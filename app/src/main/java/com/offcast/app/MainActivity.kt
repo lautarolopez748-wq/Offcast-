@@ -1,9 +1,13 @@
 package com.offcast.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -34,11 +38,16 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,6 +57,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.darkColorScheme
@@ -62,6 +72,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -70,6 +81,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 
 class MainActivity : ComponentActivity() {
@@ -78,8 +90,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        askNotificationPermission()
         if (savedInstanceState == null) handleShare(intent)
         setContent { OffcastApp(vm) }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        Core.appVisible = true
+    }
+
+    override fun onStop() {
+        Core.appVisible = false
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -87,9 +110,30 @@ class MainActivity : ComponentActivity() {
         handleShare(intent)
     }
 
-    // Permite "Compartir" un podcast de Spotify/YouTube directo a Offcast
+    // Android 13+: sin este permiso no se ven los controles de la notificación ni los avisos.
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun askNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // "Compartir" un podcast de Spotify/YouTube directo a Offcast, o tocar el aviso de un episodio nuevo
     private fun handleShare(i: Intent?) {
-        if (i?.action == Intent.ACTION_SEND) {
+        if (i == null) return
+        val feed = i.getStringExtra(Notif.EXTRA_FEED)
+        if (feed != null) {
+            i.removeExtra(Notif.EXTRA_FEED)
+            vm.screen = Screen.Home
+            vm.follows.firstOrNull { it.feedUrl == feed }?.let { vm.openFollow(it) }
+            return
+        }
+        if (i.action == Intent.ACTION_SEND) {
             val t = i.getStringExtra(Intent.EXTRA_TEXT)
             if (!t.isNullOrBlank()) {
                 vm.screen = Screen.Home
@@ -198,6 +242,66 @@ fun fmt(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
+@Composable
+fun Chip(text: String) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Accent)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+    ) {
+        Text(text, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Botón secundario (vidrio) con ícono, para repartir en una fila. */
+@Composable
+fun SoftButton(text: String, icon: ImageVector, modifier: Modifier = Modifier, highlighted: Boolean = false, onClick: () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    val base = if (dark) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.75f)
+    Row(
+        modifier
+            .height(46.dp)
+            .clip(RoundedCornerShape(23.dp))
+            .then(if (highlighted) Modifier.background(Accent) else Modifier.background(base))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        val tint = if (highlighted) Color.White else LocalContentColor.current
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(text, color = tint, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Línea de estado de un episodio: "Escuchado" o "Seguís en 12:30" + barrita de avance. */
+@Composable
+fun ListenStatus(l: Listen?) {
+    if (l == null) return
+    if (l.played) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color(0xFF4FA3FF))
+            Spacer(Modifier.width(4.dp))
+            Sub("Escuchado", 1)
+        }
+    } else if (l.pos > 10_000) {
+        Sub("Seguís en ${fmt(l.pos)}", 1)
+        if (l.dur > 0) {
+            Spacer(Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { (l.pos.toFloat() / l.dur).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(3.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun dimIf(played: Boolean): Color =
+    if (played) LocalContentColor.current.copy(alpha = 0.55f) else LocalContentColor.current
+
 // ---------- Pantalla 1: pegar link ----------
 
 @Composable
@@ -219,6 +323,13 @@ fun HomeScreen(vm: AppViewModel) {
                     value = vm.input,
                     onValueChange = { vm.input = it },
                     placeholder = { Text("Link de Spotify o YouTube, o el nombre") },
+                    trailingIcon = {
+                        if (vm.input.isNotEmpty()) {
+                            IconButton(onClick = { vm.clearSearch() }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Borrar búsqueda")
+                            }
+                        }
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     colors = TextFieldDefaults.colors(
@@ -261,18 +372,50 @@ fun HomeScreen(vm: AppViewModel) {
             }
         }
 
+        if (vm.follows.isNotEmpty()) {
+            item { Text("Siguiendo", fontSize = 20.sp, fontWeight = FontWeight.SemiBold) }
+            items(vm.follows, key = { "f" + it.feedUrl }) { f ->
+                Glass(onClick = { vm.openFollow(f) }) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Cover(f.artwork, Modifier.size(56.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(f.name, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (f.newIds.isNotEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Row {
+                                    Chip(if (f.newIds.size == 1) "1 NUEVO" else "${f.newIds.size} NUEVOS")
+                                }
+                            } else {
+                                Sub(f.author, 1)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         item { Text("Descargados", fontSize = 20.sp, fontWeight = FontWeight.SemiBold) }
         if (vm.library.isEmpty()) {
             item { Sub("Todavía no descargaste nada. Lo que bajes queda en tu teléfono.") }
         }
+        Core.error?.let { err -> item { Text(err, color = MaterialTheme.colorScheme.error) } }
         items(vm.library, key = { it.id }) { s ->
+            val l = vm.listen[s.id]
             Glass(onClick = { vm.play(s) }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Cover(s.artwork, Modifier.size(56.dp))
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(s.title, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            s.title,
+                            color = dimIf(l?.played == true),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         Sub(s.podcast, 1)
+                        ListenStatus(l)
                     }
                     IconButton(onClick = { vm.delete(s) }) {
                         Icon(Icons.Filled.Delete, contentDescription = "Borrar")
@@ -308,20 +451,49 @@ fun EpisodesScreen(vm: AppViewModel) {
                 }
             }
         }
-        vm.message?.let { msg ->
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                val following = vm.isFollowing()
+                SoftButton(
+                    text = if (following) "Siguiendo" else "Seguir",
+                    icon = if (following) Icons.Filled.Check else Icons.Filled.Add,
+                    modifier = Modifier.weight(1f),
+                    highlighted = !following
+                ) { vm.toggleFollow() }
+                SoftButton(
+                    text = "Bajar varios",
+                    icon = Icons.Filled.Download,
+                    modifier = Modifier.weight(1f)
+                ) { vm.bulkOpen = true }
+            }
+        }
+        (vm.message ?: Core.error)?.let { msg ->
             item { Text(msg, color = MaterialTheme.colorScheme.error) }
         }
-        items(vm.episodes) { e ->
-            val id = vm.idFor(e)
+        items(vm.episodes, key = { it.id }) { e ->
+            val id = e.id
             val saved = vm.library.firstOrNull { it.id == id }
             val prog = vm.progress[id]
+            val l = vm.listen[id]
             Glass {
-                Text(e.title, fontWeight = FontWeight.SemiBold, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                if (id in vm.newIds) {
+                    Row { Chip("NUEVO") }
+                    Spacer(Modifier.height(6.dp))
+                }
+                Text(
+                    e.title,
+                    color = dimIf(l?.played == true),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
                 val info = listOf(e.date, e.duration).filter { it.isNotEmpty() }.joinToString(" · ")
                 if (info.isNotEmpty()) Sub(info, 1)
+                ListenStatus(l)
                 Spacer(Modifier.height(12.dp))
                 if (saved != null) {
-                    GradientButton("Reproducir") { vm.play(saved) }
+                    val resume = l != null && !l.played && l.pos > 10_000
+                    GradientButton(if (resume) "Seguir escuchando" else "Reproducir") { vm.play(saved) }
                 } else if (prog != null) {
                     if (prog > 0f) {
                         LinearProgressIndicator(progress = { prog }, modifier = Modifier.fillMaxWidth())
@@ -334,6 +506,40 @@ fun EpisodesScreen(vm: AppViewModel) {
             }
         }
     }
+    BulkDialog(vm)
+}
+
+@Composable
+fun BulkDialog(vm: AppViewModel) {
+    if (!vm.bulkOpen) return
+    val options = vm.bulkOptions()
+    AlertDialog(
+        onDismissRequest = { vm.bulkOpen = false },
+        title = { Text("Descargar varios") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (options.isEmpty()) {
+                    Text("Ya descargaste todo lo que hay en este podcast.")
+                }
+                options.forEach { o ->
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable {
+                                vm.bulkOpen = false
+                                vm.downloadMany(o.episodes)
+                            }
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                    ) {
+                        Text(o.label, fontWeight = FontWeight.SemiBold)
+                        Sub(o.detail, 1)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { vm.bulkOpen = false }) { Text("Cancelar") } }
+    )
 }
 
 // ---------- Pantalla 3: reproductor ----------
@@ -402,8 +608,37 @@ fun PlayerScreen(vm: AppViewModel) {
                     Icon(Icons.Filled.Forward30, contentDescription = "Adelantar 30 segundos", modifier = Modifier.size(34.dp))
                 }
             }
+            Spacer(Modifier.height(20.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(1f to "1x", 1.25f to "1.25x", 1.5f to "1.5x", 2f to "2x").forEach { (value, label) ->
+                    SpeedChip(label, selected = kotlin.math.abs(vm.speed - value) < 0.01f) { vm.setSpeed(value) }
+                }
+            }
         }
         Spacer(Modifier.weight(1f))
+    }
+}
+
+@Composable
+fun SpeedChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(18.dp))
+            .then(
+                if (selected) Modifier.background(Accent)
+                else Modifier.background(if (dark) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.75f))
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (selected) Color.White else LocalContentColor.current,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            fontSize = 14.sp
+        )
     }
 }
 

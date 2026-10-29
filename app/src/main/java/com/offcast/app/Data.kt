@@ -8,14 +8,45 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 data class Podcast(val name: String, val author: String, val artwork: String, val feedUrl: String)
 
-data class Episode(val title: String, val audioUrl: String, val date: String, val duration: String)
+fun md5(s: String): String =
+    MessageDigest.getInstance("MD5").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
+
+data class Episode(
+    val title: String,
+    val audioUrl: String,
+    val date: String,
+    val duration: String,
+    val season: Int = 0,
+    val ts: Long = 0L
+) {
+    /** Identificador estable: sirve igual para el episodio en el feed y para el archivo descargado. */
+    val id: String = md5(audioUrl)
+}
 
 data class Saved(val id: String, val title: String, val podcast: String, val artwork: String, val path: String)
 
 data class FeedData(val title: String, val image: String, val episodes: List<Episode>)
+
+/** Por dónde ibas en un episodio. */
+data class Listen(val pos: Long, val dur: Long, val played: Boolean)
+
+/** Podcast seguido. [known] = episodios ya vistos; [newIds] = episodios nuevos que todavía no abriste. */
+data class Follow(
+    val feedUrl: String,
+    val name: String,
+    val author: String,
+    val artwork: String,
+    val known: Set<String>,
+    val newIds: Set<String>
+)
+
+data class DownloadJob(val id: String, val url: String, val title: String, val podcast: String, val artwork: String)
 
 object Net {
     fun open(url: String): HttpURLConnection {
@@ -94,6 +125,13 @@ object Finder {
 }
 
 object Feed {
+    private val dateFormats = listOf(
+        "EEE, dd MMM yyyy HH:mm:ss Z",
+        "EEE, dd MMM yyyy HH:mm:ss zzz",
+        "dd MMM yyyy HH:mm:ss Z",
+        "EEE, d MMM yyyy HH:mm:ss Z"
+    )
+
     fun load(feedUrl: String): FeedData {
         val c = Net.open(feedUrl)
         try {
@@ -108,6 +146,8 @@ object Feed {
             var url = ""
             var date = ""
             var dur = ""
+            var season = 0
+            var ts = 0L
             var ev = p.eventType
             while (ev != XmlPullParser.END_DOCUMENT) {
                 if (ev == XmlPullParser.START_TAG) {
@@ -118,14 +158,21 @@ object Feed {
                             url = ""
                             date = ""
                             dur = ""
+                            season = 0
+                            ts = 0L
                         }
                         "title" -> {
                             val t = p.nextText().trim()
                             if (inItem) title = t else if (channelTitle.isEmpty()) channelTitle = t
                         }
                         "enclosure" -> if (inItem) url = p.getAttributeValue(null, "url") ?: ""
-                        "pubDate" -> if (inItem) date = shortDate(p.nextText())
+                        "pubDate" -> if (inItem) {
+                            val raw = p.nextText()
+                            date = shortDate(raw)
+                            ts = parseDate(raw)
+                        }
                         "itunes:duration" -> if (inItem) dur = p.nextText().trim()
+                        "itunes:season" -> if (inItem) season = p.nextText().trim().toIntOrNull() ?: 0
                         "itunes:image" -> if (!inItem && channelImage.isEmpty()) {
                             channelImage = p.getAttributeValue(null, "href") ?: ""
                         }
@@ -133,15 +180,29 @@ object Feed {
                 } else if (ev == XmlPullParser.END_TAG && p.name == "item") {
                     inItem = false
                     if (url.isNotEmpty()) {
-                        eps.add(Episode(title.ifEmpty { "Sin título" }, url, date, formatDuration(dur)))
+                        eps.add(Episode(title.ifEmpty { "Sin título" }, url, date, formatDuration(dur), season, ts))
                     }
                 }
                 ev = p.next()
             }
-            return FeedData(channelTitle, channelImage, eps.take(150))
+            // Más nuevos primero (si el feed trae fechas); si no, se respeta el orden del feed.
+            val ordered = if (eps.isNotEmpty() && eps.all { it.ts > 0 }) eps.sortedByDescending { it.ts } else eps
+            return FeedData(channelTitle, channelImage, ordered.distinctBy { it.id }.take(150))
         } finally {
             c.disconnect()
         }
+    }
+
+    private fun parseDate(s: String): Long {
+        val t = s.trim()
+        for (f in dateFormats) {
+            try {
+                return SimpleDateFormat(f, Locale.US).parse(t)?.time ?: continue
+            } catch (e: Exception) {
+                // probar el siguiente formato
+            }
+        }
+        return 0L
     }
 
     private fun shortDate(s: String): String {
@@ -159,13 +220,27 @@ object Feed {
     }
 }
 
-class Store(dir: File) {
-    private val file = File(dir, "library.json")
+/** Guarda biblioteca, progreso de escucha y podcasts seguidos en archivos JSON. */
+class Store(private val dir: File) {
+    private val libFile = File(dir, "library.json")
+    private val listenFile = File(dir, "listen.json")
+    private val followFile = File(dir, "follows.json")
+
+    private fun write(file: File, text: String) {
+        val tmp = File(dir, file.name + ".tmp")
+        tmp.writeText(text)
+        if (!tmp.renameTo(file)) {
+            file.writeText(text)
+            tmp.delete()
+        }
+    }
+
+    // ----- Biblioteca -----
 
     fun load(): List<Saved> {
-        if (!file.exists()) return emptyList()
+        if (!libFile.exists()) return emptyList()
         return try {
-            val arr = JSONArray(file.readText())
+            val arr = JSONArray(libFile.readText())
             (0 until arr.length()).map {
                 val o = arr.getJSONObject(it)
                 Saved(o.getString("id"), o.getString("title"), o.getString("podcast"), o.getString("artwork"), o.getString("path"))
@@ -187,6 +262,74 @@ class Store(dir: File) {
                     .put("path", it.path)
             )
         }
-        file.writeText(arr.toString())
+        write(libFile, arr.toString())
+    }
+
+    // ----- Progreso de escucha -----
+
+    fun loadListen(): Map<String, Listen> {
+        if (!listenFile.exists()) return emptyMap()
+        return try {
+            val o = JSONObject(listenFile.readText())
+            val out = HashMap<String, Listen>()
+            for (k in o.keys()) {
+                val e = o.getJSONObject(k)
+                out[k] = Listen(e.optLong("p"), e.optLong("d"), e.optBoolean("f"))
+            }
+            out
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    fun saveListen(map: Map<String, Listen>) {
+        val o = JSONObject()
+        map.forEach { (k, v) -> o.put(k, JSONObject().put("p", v.pos).put("d", v.dur).put("f", v.played)) }
+        write(listenFile, o.toString())
+    }
+
+    // ----- Podcasts seguidos -----
+
+    fun loadFollows(): List<Follow> {
+        if (!followFile.exists()) return emptyList()
+        return try {
+            val arr = JSONArray(followFile.readText())
+            (0 until arr.length()).map {
+                val o = arr.getJSONObject(it)
+                Follow(
+                    o.getString("feedUrl"),
+                    o.optString("name"),
+                    o.optString("author"),
+                    o.optString("artwork"),
+                    strings(o.optJSONArray("known")),
+                    strings(o.optJSONArray("new"))
+                )
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun saveFollows(list: List<Follow>) {
+        val arr = JSONArray()
+        list.forEach {
+            arr.put(
+                JSONObject()
+                    .put("feedUrl", it.feedUrl)
+                    .put("name", it.name)
+                    .put("author", it.author)
+                    .put("artwork", it.artwork)
+                    .put("known", JSONArray(it.known.toList()))
+                    .put("new", JSONArray(it.newIds.toList()))
+            )
+        }
+        write(followFile, arr.toString())
+    }
+
+    private fun strings(a: JSONArray?): Set<String> {
+        if (a == null) return emptySet()
+        val s = HashSet<String>()
+        for (i in 0 until a.length()) s.add(a.getString(i))
+        return s
     }
 }
