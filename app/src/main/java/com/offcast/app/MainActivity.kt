@@ -611,7 +611,7 @@ fun PlayerScreen(vm: AppViewModel) {
             Spacer(Modifier.height(20.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(1f to "1x", 1.25f to "1.25x", 1.5f to "1.5x", 2f to "2x").forEach { (value, label) ->
-                    SpeedChip(label, selected = kotlin.math.abs(vm.speed - value) < 0.01f) { vm.setSpeed(value) }
+                    SpeedChip(label, selected = kotlin.math.abs(vm.speed - value) < 0.01f) { vm.changeSpeed(value) }
                 }
             }
         }

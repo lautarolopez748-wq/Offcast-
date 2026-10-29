@@ -314,7 +314,7 @@ class AppViewModel(private val app: Application) : AndroidViewModel(app) {
         position = (position + ms).coerceIn(0L, max)
     }
 
-    fun setSpeed(value: Float) {
+    fun changeSpeed(value: Float) {
         speed = value
         Core.speed = value
         withController { it.setPlaybackSpeed(value) }
