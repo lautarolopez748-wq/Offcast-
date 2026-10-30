@@ -8,6 +8,15 @@ android {
     namespace = "com.offcast.app"
     compileSdk = 34
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("offcast-release.jks")
+            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "offcast123"
+            keyAlias = System.getenv("KEY_ALIAS") ?: "offcast"
+            keyPassword = System.getenv("KEY_PASSWORD") ?: "offcast123"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.offcast.app"
         minSdk = 26
@@ -17,7 +26,12 @@ android {
     }
 
     buildTypes {
-        release { isMinifyEnabled = false }
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

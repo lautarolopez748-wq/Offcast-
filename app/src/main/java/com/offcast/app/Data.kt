@@ -108,26 +108,24 @@ object Finder {
     }
 
     /** De una página web, busca la URL del feed RSS (<link rel="alternate" type="application/rss+xml">). */
-    fun findFeedUrl(pageUrl: String): String? {
-        try {
-            val html = Net.text(pageUrl)
-            val regex = Regex("""<link[^>]+type\s*=\s*["']application/rss\+xml["'][^>]+href\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            val match = regex.find(html) ?: return null
-            val href = match.groupValues[1]
-            return if (href.startsWith("http")) href else {
-                // URL relativa: resolver contra la base
-                val base = URL(pageUrl)
-                URL(base, href).toString()
-            }
-        } catch (e: Exception) {
-            null
+    fun findFeedUrl(pageUrl: String): String? = try {
+        val html = Net.text(pageUrl)
+        val regex = Regex("""<link[^>]+type\s*=\s*["']application/rss\+xml["'][^>]+href\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val match = regex.find(html) ?: return null
+        val href = match.groupValues[1]
+        if (href.startsWith("http")) href else {
+            // URL relativa: resolver contra la base
+            val base = URL(pageUrl)
+            URL(base, href).toString()
         }
+    } catch (e: Exception) {
+        null
     }
 
     /** Busca el podcast en el directorio público de Apple y devuelve los feeds RSS. */
-    fun search(query: String): List<Podcast> {
+    fun search(query: String, country: String = "US"): List<Podcast> {
         val json = JSONObject(
-            Net.text("https://itunes.apple.com/search?media=podcast&entity=podcast&limit=8&term=" + Net.enc(query))
+            Net.text("https://itunes.apple.com/search?media=podcast&entity=podcast&limit=8&country=$country&term=" + Net.enc(query))
         )
         val arr = json.getJSONArray("results")
         val out = ArrayList<Podcast>()
@@ -142,6 +140,9 @@ object Finder {
 }
 
 object Feed {
+    private data class Cached(val data: FeedData, val at: Long)
+    private val cache = HashMap<String, Cached>()
+    private const val TTL_MS = 30 * 60 * 1000L
     private val dateFormats = listOf(
         "EEE, dd MMM yyyy HH:mm:ss Z",
         "EEE, dd MMM yyyy HH:mm:ss zzz",
@@ -150,6 +151,16 @@ object Feed {
     )
 
     fun load(feedUrl: String): FeedData {
+        synchronized(cache) {
+            val c = cache[feedUrl]
+            if (c != null && System.currentTimeMillis() - c.at < TTL_MS) return c.data
+        }
+        val data = loadUncached(feedUrl)
+        synchronized(cache) { cache[feedUrl] = Cached(data, System.currentTimeMillis()) }
+        return data
+    }
+
+    private fun loadUncached(feedUrl: String): FeedData {
         val c = Net.open(feedUrl)
         try {
             val p = Xml.newPullParser()

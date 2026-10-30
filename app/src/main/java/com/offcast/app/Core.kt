@@ -2,6 +2,8 @@ package com.offcast.app
 
 import android.app.Application
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +40,33 @@ object Core {
 
     /** Último error de descarga en segundo plano (la UI lo muestra). */
     var error by mutableStateOf<String?>(null)
+    var restoreAvailable by mutableStateOf(false)
+
+    /** Job que falló, para poder reintentarlo desde la UI. */
+    var lastErrorJob by mutableStateOf<DownloadJob?>(null)
+
+    /** Descarta el error visible. */
+    fun clearError() {
+        error = null
+        lastErrorJob = null
+    }
+
+    /** Vuelve a encolar la última descarga que falló. */
+    fun retryLastError() {
+        val job = lastErrorJob ?: return
+        clearError()
+        enqueue(listOf(job))
+    }
+
+    /** ¿Hay red permitida para descargar (Wi-Fi o datos autorizados)? */
+    fun canDownloadOnCurrentNetwork(): Boolean {
+        val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        val onWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        val allowMobile = app.getSharedPreferences("prefs", Context.MODE_PRIVATE).getBoolean("download_on_mobile", false)
+        return onWifi || allowMobile
+    }
 
     /** true mientras la pantalla de la app está visible. */
     @Volatile
@@ -59,7 +88,13 @@ object Core {
         speed = application.getSharedPreferences("prefs", Context.MODE_PRIVATE).getFloat("speed", 1f)
     }
 
-    // ---------- Biblioteca ----------
+    /** Recarga biblioteca/progreso/seguidos desde disco (tras restaurar un respaldo). */
+    fun reload() {
+        library = store.load()
+        listen.clear()
+        listen.putAll(store.loadListen())
+        follows = store.loadFollows()
+    }
 
     fun addSaved(s: Saved) = synchronized(lock) {
         library = library.filter { it.id != s.id } + s
@@ -136,6 +171,7 @@ object Core {
         }
         if (added > 0) {
             error = null
+            lastErrorJob = null
             DownloadService.start(app)
         }
         return added

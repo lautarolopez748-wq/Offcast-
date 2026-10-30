@@ -37,6 +37,11 @@ class PlaybackService : MediaSessionService() {
     private val ticker = object : Runnable {
         override fun run() {
             saveNow()
+            val sleepUntil = getSharedPreferences("prefs", MODE_PRIVATE).getLong("sleep_until", 0L)
+            if (sleepUntil > 0 && System.currentTimeMillis() >= sleepUntil) {
+                exo.pause()
+                getSharedPreferences("prefs", MODE_PRIVATE).edit().putLong("sleep_until", 0L).apply()
+            }
             if (exo.isPlaying) handler.postDelayed(this, 5000)
         }
     }

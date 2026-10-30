@@ -31,6 +31,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -41,7 +43,8 @@ class OffcastApplication : Application() {
         super.onCreate()
         Core.init(this)
         Notif.createChannels(this)
-        // Cada ~6 horas busca episodios nuevos de los podcasts que seguís.
+        Core.restoreAvailable = Core.library.isEmpty() && Backup.has(this)
+        // Cada ~6 horas busca episodios nuevos...
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
             "follow-check",
             ExistingPeriodicWorkPolicy.KEEP,
@@ -137,6 +140,10 @@ class DownloadService : Service() {
     }
 
     private suspend fun runQueue() {
+        if (!Core.canDownloadOnCurrentNetwork()) {
+            Core.error = "Descargas pausadas: conectate a Wi-Fi o activá 'Usar datos móviles' en Ajustes."
+            return
+        }
         acquireWake()
         try {
             while (true) {
@@ -148,6 +155,7 @@ class DownloadService : Service() {
                     throw e
                 } catch (e: Exception) {
                     Core.error = "Falló la descarga de \"${job.title}\": ${e.message ?: "sin conexión"}"
+                    Core.lastErrorJob = job
                 } finally {
                     Core.progress.remove(job.id)
                 }
@@ -274,26 +282,27 @@ object FollowChecker {
     private const val NEW_ID = 103
 
     suspend fun checkAll(notify: Boolean, autoDownload: Boolean = false) = withContext(Dispatchers.IO) {
-        val fresh = ArrayList<Pair<Follow, List<Episode>>>()
-        val jobs = ArrayList<DownloadJob>()
-        for (f in Core.follows) {
-            try {
-                val data = Feed.load(f.feedUrl)
-                val ids = Core.registerFeed(f.feedUrl, data.episodes.map { it.id })
-                if (ids.isNotEmpty()) {
+        val results = Core.follows.map { f ->
+            async {
+                try {
+                    val data = Feed.load(f.feedUrl)
+                    val ids = Core.registerFeed(f.feedUrl, data.episodes.map { it.id })
+                    if (ids.isEmpty()) return@async null
                     val newEps = data.episodes.filter { it.id in ids }
-                    fresh.add(f to newEps)
-                    if (autoDownload) {
-                        for (e in newEps) {
-                            jobs.add(DownloadJob(e.id, e.audioUrl, e.title, f.name, f.artwork))
-                        }
-                    }
+                    val jobs = if (autoDownload) newEps.map { e ->
+                        DownloadJob(e.id, e.audioUrl, e.title, f.name, f.artwork)
+                    } else emptyList()
+                    Triple(f, newEps, jobs)
+                } catch (e: Exception) {
+                    // sin conexión o feed caído: se reintenta en la próxima vuelta
+                    null
                 }
-            } catch (e: Exception) {
-                // sin conexión o feed caído: se reintenta en la próxima vuelta
             }
-        }
-        if (autoDownload && jobs.isNotEmpty()) {
+        }.awaitAll().filterNotNull()
+
+        val fresh = results.map { it.first to it.second }
+        val jobs = results.flatMap { it.third }
+        if (autoDownload && jobs.isNotEmpty() && Core.canDownloadOnCurrentNetwork()) {
             Core.enqueue(jobs)
         }
         if (notify && fresh.isNotEmpty()) showNew(fresh)
@@ -330,7 +339,7 @@ object FollowChecker {
 
 class FollowWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
-        val auto = ctx.getSharedPreferences("prefs", Context.MODE_PRIVATE).getBoolean("auto_download", false)
+        val auto = applicationContext.getSharedPreferences("prefs", Context.MODE_PRIVATE).getBoolean("auto_download", false)
         FollowChecker.checkAll(notify = true, autoDownload = auto)
         return Result.success()
     }

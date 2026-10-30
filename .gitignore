@@ -1,0 +1,10 @@
+*.jks
+*.keystore
+.gradle/
+app/build/
+build/
+*.iml
+.idea/
+local.properties
+.DS_Store
+Thumbs.db
