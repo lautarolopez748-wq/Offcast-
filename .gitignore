@@ -10,3 +10,6 @@ local.properties
 Thumbs.db
 keystore.properties
 
+
+.kotlin/
+
