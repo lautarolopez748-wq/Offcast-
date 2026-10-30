@@ -10,10 +10,13 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("offcast-release.jks")
-            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "offcast123"
-            keyAlias = System.getenv("KEY_ALIAS") ?: "offcast"
-            keyPassword = System.getenv("KEY_PASSWORD") ?: "offcast123"
+            val ks = file("offcast-release.jks")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "offcast123"
+                keyAlias = System.getenv("KEY_ALIAS") ?: "offcast"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "offcast123"
+            }
         }
     }
 
@@ -27,7 +30,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            if (file("offcast-release.jks").exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
