@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,10 +14,19 @@ android {
         create("release") {
             val ks = file("offcast-release.jks")
             if (ks.exists()) {
+                val props = Properties()
+                val propsFile = file("keystore.properties")
+                if (propsFile.exists()) props.load(propsFile.inputStream())
                 storeFile = ks
-                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "offcast123"
-                keyAlias = System.getenv("KEY_ALIAS") ?: "offcast"
-                keyPassword = System.getenv("KEY_PASSWORD") ?: "offcast123"
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                    ?: props.getProperty("KEYSTORE_PASSWORD")
+                    ?: ""
+                keyAlias = System.getenv("KEY_ALIAS")
+                    ?: props.getProperty("KEY_ALIAS")
+                    ?: "offcast"
+                keyPassword = System.getenv("KEY_PASSWORD")
+                    ?: props.getProperty("KEY_PASSWORD")
+                    ?: ""
             }
         }
     }
@@ -30,8 +41,12 @@ android {
 
     buildTypes {
         release {
-            if (file("offcast-release.jks").exists()) {
-                signingConfig = signingConfigs.getByName("release")
+            val ks = file("offcast-release.jks")
+            if (ks.exists()) {
+                val sp = System.getenv("KEYSTORE_PASSWORD") ?: (project.findProperty("KEYSTORE_PASSWORD") as String?)
+                if (!sp.isNullOrBlank()) {
+                    signingConfig = signingConfigs.getByName("release")
+                }
             }
             isMinifyEnabled = true
             isShrinkResources = true
